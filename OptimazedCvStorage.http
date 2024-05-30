@@ -1,0 +1,6 @@
+@OptimazedCvStorage_HostAddress = http://localhost:5036
+
+GET {{OptimazedCvStorage_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
