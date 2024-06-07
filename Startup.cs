@@ -38,6 +38,7 @@ public class Startup
         services.AddDbContext<CVContext>(options =>
             options.UseMySql(GetConnectionString("OptimazedCvStorage"),
                 new MySqlServerVersion(new System.Version(8, 0, 23))));
+        var OptimazedCvStorage = Environment.GetEnvironmentVariable("OptimazedCvStorage");
     }
 
     public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
