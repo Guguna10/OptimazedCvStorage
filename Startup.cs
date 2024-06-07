@@ -7,6 +7,7 @@ using Microsoft.Extensions.Hosting;
 using Newtonsoft.Json.Serialization;
 using Pomelo.EntityFrameworkCore.MySql.Infrastructure;
 using OptimazedCvStorage.Data;
+using dotenv.net;
 
 public class Startup
 {
