@@ -2,9 +2,14 @@
 {
     public class Education
     {
-        public int PersonId { get; set; }
-        public string University { get; set; }
-        public string School { get; set; }
-        public string Courses { get; set; }
+        public int EducationID { get; set; }
+        public int UserID { get; set; }
+        public string InstitutionName { get; set; }
+        public string Degree { get; set; }
+        public string FieldOfStudy { get; set; }
+        public DateTime StartDate { get; set; }
+        public DateTime EndDate { get; set; }
+
+        public User User { get; set; }
     }
 }
