@@ -3,10 +3,12 @@ using MySql.Data.MySqlClient;
 using OptimazedCvStorage.Models;
 using System.Data;
 using OptimazedCvStorage.DTOs;
-
+using RabbitMQ.Client;
 
 using Microsoft.EntityFrameworkCore;
 using OptimazedCvStorage.Data;
+using Newtonsoft.Json;
+using System.Text;
 
 namespace OptimazedCvStorage.Controllers
 {
@@ -91,100 +93,146 @@ namespace OptimazedCvStorage.Controllers
             }
         }
 
-
         [HttpPost]
         public async Task<JsonResult> Post(FullCvDto fullCvDto)
         {
-            using var transaction = await _context.Database.BeginTransactionAsync();
             try
             {
-                var user = new User
+                using var transaction = await _context.Database.BeginTransactionAsync();
+
+                try
                 {
-                    Username = fullCvDto.Username,
-                    Email = fullCvDto.Email,
-                    CreatedAt = DateTime.Now
-                };
-
-                _context.Users.Add(user);
-                await _context.SaveChangesAsync();
-
-                var personalInfo = new PersonalInfo
-                {
-                    UserID = user.UserID,
-                    FullName = fullCvDto.FullName,
-                    Address = fullCvDto.Address,
-                    PhoneNumber = fullCvDto.PhoneNumber,
-                    DateOfBirth = fullCvDto.DateOfBirth ?? DateTime.MinValue // Handle nullable DateTime
-                };
-
-                _context.PersonalInfo.Add(personalInfo);
-
-                foreach (var educationDto in fullCvDto.Educations)
-                {
-                    var education = new Education
+                    // Create a new user
+                    var user = new User
                     {
-                        UserID = user.UserID,
-                        InstitutionName = educationDto.InstitutionName,
-                        Degree = educationDto.Degree,
-                        FieldOfStudy = educationDto.FieldOfStudy,
-                        StartDate = educationDto.StartDate ?? DateTime.MinValue,
-                        EndDate = educationDto.EndDate ?? DateTime.MinValue
+                        Username = fullCvDto.Username,
+                        Email = fullCvDto.Email,
+                        CreatedAt = DateTime.Now
                     };
 
-                    _context.Education.Add(education);
-                }
+                    // Add the user to the database
+                    _context.Users.Add(user);
+                    await _context.SaveChangesAsync();
 
-                foreach (var certificationDto in fullCvDto.Certifications)
-                {
-                    var certification = new Certification
+                    // Add personal information
+                    var personalInfo = new PersonalInfo
                     {
                         UserID = user.UserID,
-                        CertificationName = certificationDto.CertificationName,
-                        IssuingOrganization = certificationDto.IssuingOrganization,
-                        IssueDate = certificationDto.IssueDate ?? DateTime.MinValue,
-                        ExpiryDate = certificationDto.ExpiryDate ?? DateTime.MinValue
+                        FullName = fullCvDto.FullName,
+                        Address = fullCvDto.Address,
+                        PhoneNumber = fullCvDto.PhoneNumber,
+                        DateOfBirth = fullCvDto.DateOfBirth ?? DateTime.MinValue
                     };
+                    _context.PersonalInfo.Add(personalInfo);
 
-                    _context.Certifications.Add(certification);
-                }
-
-                foreach (var skillDto in fullCvDto.Skills)
-                {
-                    var skill = new Skill
+                    // Add educations
+                    foreach (var educationDto in fullCvDto.Educations)
                     {
-                        UserID = user.UserID,
-                        SkillName = skillDto.SkillName,
-                        SkillLevel = skillDto.SkillLevel
-                    };
+                        var education = new Education
+                        {
+                            UserID = user.UserID,
+                            InstitutionName = educationDto.InstitutionName,
+                            Degree = educationDto.Degree,
+                            FieldOfStudy = educationDto.FieldOfStudy,
+                            StartDate = educationDto.StartDate ?? DateTime.MinValue,
+                            EndDate = educationDto.EndDate ?? DateTime.MinValue
+                        };
+                        _context.Education.Add(education);
+                    }
 
-                    _context.Skills.Add(skill);
-                }
-
-                foreach (var workExperienceDto in fullCvDto.WorkExperiences)
-                {
-                    var workExperience = new WorkExperience
+                    // Add certifications
+                    foreach (var certificationDto in fullCvDto.Certifications)
                     {
-                        UserID = user.UserID,
-                        CompanyName = workExperienceDto.CompanyName,
-                        Position = workExperienceDto.Position,
-                        StartDate = workExperienceDto.StartDate ?? DateTime.MinValue,
-                        EndDate = workExperienceDto.EndDate ?? DateTime.MinValue,
-                        Responsibilities = workExperienceDto.Responsibilities
-                    };
+                        var certification = new Certification
+                        {
+                            UserID = user.UserID,
+                            CertificationName = certificationDto.CertificationName,
+                            IssuingOrganization = certificationDto.IssuingOrganization,
+                            IssueDate = certificationDto.IssueDate ?? DateTime.MinValue,
+                            ExpiryDate = certificationDto.ExpiryDate ?? DateTime.MinValue
+                        };
+                        _context.Certifications.Add(certification);
+                    }
 
-                    _context.WorkExperience.Add(workExperience);
+                    // Add skills
+                    foreach (var skillDto in fullCvDto.Skills)
+                    {
+                        var skill = new Skill
+                        {
+                            UserID = user.UserID,
+                            SkillName = skillDto.SkillName,
+                            SkillLevel = skillDto.SkillLevel
+                        };
+                        _context.Skills.Add(skill);
+                    }
+
+                    // Add work experiences
+                    foreach (var workExperienceDto in fullCvDto.WorkExperiences)
+                    {
+                        var workExperience = new WorkExperience
+                        {
+                            UserID = user.UserID,
+                            CompanyName = workExperienceDto.CompanyName,
+                            Position = workExperienceDto.Position,
+                            StartDate = workExperienceDto.StartDate ?? DateTime.MinValue,
+                            EndDate = workExperienceDto.EndDate ?? DateTime.MinValue,
+                            Responsibilities = workExperienceDto.Responsibilities
+                        };
+                        _context.WorkExperience.Add(workExperience);
+                    }
+
+                    // Save changes to the database
+                    await _context.SaveChangesAsync();
+
+                    // Commit transaction
+                    await transaction.CommitAsync();
+
+                    // Enqueue CV for processing
+                    EnqueueCvForProcessing(fullCvDto);
+
+                    return new JsonResult("CV added successfully and enqueued for processing.");
                 }
-
-                await _context.SaveChangesAsync();
-
-                await transaction.CommitAsync();
-
-                return new JsonResult("Added Successfully");
+                catch (Exception ex)
+                {
+                    await transaction.RollbackAsync();
+                    return new JsonResult("Error: " + ex.Message);
+                }
             }
             catch (Exception ex)
             {
-                await transaction.RollbackAsync();
                 return new JsonResult("Error: " + ex.Message);
+            }
+        }
+
+        private void EnqueueCvForProcessing(FullCvDto fullCvDto)
+        {
+            try
+            {
+                var factory = new ConnectionFactory() { HostName = "localhost" };
+                using (var connection = factory.CreateConnection())
+                using (var channel = connection.CreateModel())
+                {
+                    channel.QueueDeclare(queue: "cv_processing_queue",
+                                         durable: true,
+                                         exclusive: false,
+                                         autoDelete: false,
+                                         arguments: null);
+
+                    string message = JsonConvert.SerializeObject(fullCvDto);
+                    var body = Encoding.UTF8.GetBytes(message);
+
+                    var properties = channel.CreateBasicProperties();
+                    properties.Persistent = true;
+
+                    channel.BasicPublish(exchange: "",
+                                         routingKey: "cv_processing_queue",
+                                         basicProperties: properties,
+                                         body: body);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Error enqueuing CV for processing: " + ex.Message);
             }
         }
 
