@@ -22,33 +22,30 @@ namespace OptimazedCvStorage.Controllers
         {
             _context = context;
         }
+
+
         [HttpGet]
         public async Task<JsonResult> GetAllCvs()
         {
             try
             {
-                var users = await _context.Users.ToListAsync();
-                var allCvs = new List<FullCvDto>();
-
-                foreach (var user in users)
-                {
-                    var personalInfo = await _context.PersonalInfo.FirstOrDefaultAsync(pi => pi.UserID == user.UserID);
-                    var educations = await _context.Education.Where(e => e.UserID == user.UserID).ToListAsync();
-                    var certifications = await _context.Certifications.Where(c => c.UserID == user.UserID).ToListAsync();
-                    var skills = await _context.Skills.Where(s => s.UserID == user.UserID).ToListAsync();
-                    var workExperiences = await _context.WorkExperience.Where(we => we.UserID == user.UserID).ToListAsync();
-
-                    var fullCvDto = new FullCvDto
+                var allCvs = await _context.Users
+                    .Include(u => u.PersonalInfo)
+                    .Include(u => u.Educations)
+                    .Include(u => u.Certifications)
+                    .Include(u => u.Skills)
+                    .Include(u => u.WorkExperiences)
+                    .Select(user => new FullCvDto
                     {
                         UserID = user.UserID,
-                        PersonalInfoID = personalInfo.PersonalInfoID,
+                        PersonalInfoID = user.PersonalInfo.PersonalInfoID,
                         Username = user.Username,
                         Email = user.Email,
-                        FullName = personalInfo?.FullName,
-                        Address = personalInfo?.Address,
-                        PhoneNumber = personalInfo?.PhoneNumber,
-                        DateOfBirth = personalInfo?.DateOfBirth,
-                        Educations = educations.Select(e => new EducationDto
+                        FullName = user.PersonalInfo.FullName,
+                        Address = user.PersonalInfo.Address,
+                        PhoneNumber = user.PersonalInfo.PhoneNumber,
+                        DateOfBirth = user.PersonalInfo.DateOfBirth,
+                        Educations = user.Educations.Select(e => new EducationDto
                         {
                             EducationID = e.EducationID,
                             InstitutionName = e.InstitutionName,
@@ -57,7 +54,7 @@ namespace OptimazedCvStorage.Controllers
                             StartDate = e.StartDate,
                             EndDate = e.EndDate
                         }).ToList(),
-                        Certifications = certifications.Select(c => new CertificationDto
+                        Certifications = user.Certifications.Select(c => new CertificationDto
                         {
                             CertificationID = c.CertificationID,
                             CertificationName = c.CertificationName,
@@ -65,13 +62,13 @@ namespace OptimazedCvStorage.Controllers
                             IssueDate = c.IssueDate,
                             ExpiryDate = c.ExpiryDate
                         }).ToList(),
-                        Skills = skills.Select(s => new SkillDto
+                        Skills = user.Skills.Select(s => new SkillDto
                         {
                             SkillID = s.SkillID,
                             SkillName = s.SkillName,
                             SkillLevel = s.SkillLevel
                         }).ToList(),
-                        WorkExperiences = workExperiences.Select(we => new WorkExperienceDto
+                        WorkExperiences = user.WorkExperiences.Select(we => new WorkExperienceDto
                         {
                             WorkExperienceID = we.WorkExperienceID,
                             CompanyName = we.CompanyName,
@@ -80,10 +77,8 @@ namespace OptimazedCvStorage.Controllers
                             EndDate = we.EndDate,
                             Responsibilities = we.Responsibilities
                         }).ToList()
-                    };
-
-                    allCvs.Add(fullCvDto);
-                }
+                    })
+                    .ToListAsync();
 
                 return new JsonResult(allCvs);
             }
@@ -92,6 +87,7 @@ namespace OptimazedCvStorage.Controllers
                 return new JsonResult("Error: " + ex.Message);
             }
         }
+
 
         [HttpPost]
         public async Task<JsonResult> Post(FullCvDto fullCvDto)
@@ -202,7 +198,7 @@ namespace OptimazedCvStorage.Controllers
             {
                 return new JsonResult("Error: " + ex.Message);
             }
-        }
+        }  
 
         private void EnqueueCvForProcessing(FullCvDto fullCvDto)
         {
@@ -235,6 +231,7 @@ namespace OptimazedCvStorage.Controllers
                 Console.WriteLine("Error enqueuing CV for processing: " + ex.Message);
             }
         }
+
 
         [HttpPut("{id}")]
         public async Task<JsonResult> Update(int id, FullCvDto fullCvDto)
@@ -366,7 +363,6 @@ namespace OptimazedCvStorage.Controllers
                 return StatusCode(500, "An error occurred while deleting the user. Please try again later.");
             }
         }
-
 
 
         [HttpDelete("deleteAll")]
