@@ -8,6 +8,7 @@ using Newtonsoft.Json.Serialization;
 using Pomelo.EntityFrameworkCore.MySql.Infrastructure;
 using OptimazedCvStorage.Data;
 using dotenv.net;
+using RabbitMQ.Client;
 
 public class Startup
 {
@@ -39,7 +40,16 @@ public class Startup
         services.AddDbContext<CVContext>(options =>
             options.UseMySql(GetConnectionString("OptimazedCvStorage"),
                 new MySqlServerVersion(new System.Version(8, 0, 23))));
+
         var OptimazedCvStorage = Environment.GetEnvironmentVariable("OptimazedCvStorage");
+
+
+        services.AddSingleton<IConnection>(_ =>
+        {
+            var factory = new ConnectionFactory() { HostName = "localhost" };
+            return factory.CreateConnection();
+        });
+
     }
 
     public void Configure(IApplicationBuilder app, IWebHostEnvironment env)

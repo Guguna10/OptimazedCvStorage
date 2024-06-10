@@ -1,14 +1,15 @@
 ﻿using Microsoft.AspNetCore.Mvc;
-using MySql.Data.MySqlClient;
-using OptimazedCvStorage.Models;
-using System.Data;
-using OptimazedCvStorage.DTOs;
-using RabbitMQ.Client;
-
 using Microsoft.EntityFrameworkCore;
-using OptimazedCvStorage.Data;
 using Newtonsoft.Json;
+using OptimazedCvStorage.Data;
+using OptimazedCvStorage.DTOs;
+using OptimazedCvStorage.Models;
+using RabbitMQ.Client;
+using RabbitMQ.Client.Events;
+using System;
+using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace OptimazedCvStorage.Controllers
 {
@@ -17,12 +18,14 @@ namespace OptimazedCvStorage.Controllers
     public class UsersController : ControllerBase
     {
         private readonly CVContext _context;
+        private readonly IConnection _rabbitMqConnection; // RabbitMQ connection
+        private readonly string _queueName = "cv_processing_queue";
 
-        public UsersController(CVContext context)
+        public UsersController(CVContext context, IConnection rabbitMqConnection)
         {
             _context = context;
+            _rabbitMqConnection = rabbitMqConnection;
         }
-
 
         [HttpGet]
         public async Task<JsonResult> GetAllCvs()
@@ -89,146 +92,201 @@ namespace OptimazedCvStorage.Controllers
         }
 
 
-        [HttpPost]
-        public async Task<JsonResult> Post(FullCvDto fullCvDto)
+        [HttpGet("{id}")]
+        public async Task<IActionResult> GetCvById(int id)
         {
             try
             {
-                using var transaction = await _context.Database.BeginTransactionAsync();
+                var cv = await _context.Users
+                    .Include(u => u.PersonalInfo)
+                    .Include(u => u.Educations)
+                    .Include(u => u.Certifications)
+                    .Include(u => u.Skills)
+                    .Include(u => u.WorkExperiences)
+                    .FirstOrDefaultAsync(u => u.UserID == id);
 
-                try
+                if (cv == null)
                 {
-                    // Create a new user
-                    var user = new User
-                    {
-                        Username = fullCvDto.Username,
-                        Email = fullCvDto.Email,
-                        CreatedAt = DateTime.Now
-                    };
-
-                    // Add the user to the database
-                    _context.Users.Add(user);
-                    await _context.SaveChangesAsync();
-
-                    // Add personal information
-                    var personalInfo = new PersonalInfo
-                    {
-                        UserID = user.UserID,
-                        FullName = fullCvDto.FullName,
-                        Address = fullCvDto.Address,
-                        PhoneNumber = fullCvDto.PhoneNumber,
-                        DateOfBirth = fullCvDto.DateOfBirth ?? DateTime.MinValue
-                    };
-                    _context.PersonalInfo.Add(personalInfo);
-
-                    // Add educations
-                    foreach (var educationDto in fullCvDto.Educations)
-                    {
-                        var education = new Education
-                        {
-                            UserID = user.UserID,
-                            InstitutionName = educationDto.InstitutionName,
-                            Degree = educationDto.Degree,
-                            FieldOfStudy = educationDto.FieldOfStudy,
-                            StartDate = educationDto.StartDate ?? DateTime.MinValue,
-                            EndDate = educationDto.EndDate ?? DateTime.MinValue
-                        };
-                        _context.Education.Add(education);
-                    }
-
-                    // Add certifications
-                    foreach (var certificationDto in fullCvDto.Certifications)
-                    {
-                        var certification = new Certification
-                        {
-                            UserID = user.UserID,
-                            CertificationName = certificationDto.CertificationName,
-                            IssuingOrganization = certificationDto.IssuingOrganization,
-                            IssueDate = certificationDto.IssueDate ?? DateTime.MinValue,
-                            ExpiryDate = certificationDto.ExpiryDate ?? DateTime.MinValue
-                        };
-                        _context.Certifications.Add(certification);
-                    }
-
-                    // Add skills
-                    foreach (var skillDto in fullCvDto.Skills)
-                    {
-                        var skill = new Skill
-                        {
-                            UserID = user.UserID,
-                            SkillName = skillDto.SkillName,
-                            SkillLevel = skillDto.SkillLevel
-                        };
-                        _context.Skills.Add(skill);
-                    }
-
-                    // Add work experiences
-                    foreach (var workExperienceDto in fullCvDto.WorkExperiences)
-                    {
-                        var workExperience = new WorkExperience
-                        {
-                            UserID = user.UserID,
-                            CompanyName = workExperienceDto.CompanyName,
-                            Position = workExperienceDto.Position,
-                            StartDate = workExperienceDto.StartDate ?? DateTime.MinValue,
-                            EndDate = workExperienceDto.EndDate ?? DateTime.MinValue,
-                            Responsibilities = workExperienceDto.Responsibilities
-                        };
-                        _context.WorkExperience.Add(workExperience);
-                    }
-
-                    // Save changes to the database
-                    await _context.SaveChangesAsync();
-
-                    // Commit transaction
-                    await transaction.CommitAsync();
-
-                    // Enqueue CV for processing
-                    EnqueueCvForProcessing(fullCvDto);
-
-                    return new JsonResult("CV added successfully and enqueued for processing.");
+                    return NotFound($"CV with ID {id} not found.");
                 }
-                catch (Exception ex)
+
+                return Ok(cv);
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, $"An error occurred while retrieving CV: {ex.Message}");
+            }
+        }
+
+
+        [HttpPost("storeinqueue")]
+        public async Task<JsonResult> StoreCvInQueue([FromBody] List<FullCvDto> fullCvDtos)
+        {
+            try
+            {
+                foreach (var fullCvDto in fullCvDtos)
                 {
-                    await transaction.RollbackAsync();
-                    return new JsonResult("Error: " + ex.Message);
+                    // Enqueue each CV for processing
+                    EnqueueCvForProcessing(fullCvDto);
+                }
+
+                return new JsonResult("CVs enqueued successfully for processing.");
+            }
+            catch (Exception ex)
+            {
+                return new JsonResult("Error: " + ex.Message);
+            }
+        }
+
+        private void EnqueueCvForProcessing(FullCvDto fullCvDto)
+        {
+            var factory = new ConnectionFactory() { HostName = "localhost" }; 
+            using (var connection = factory.CreateConnection())
+            using (var channel = connection.CreateModel())
+            {
+                channel.QueueDeclare(queue: "cv_processing_queue",
+                                     durable: true,
+                                     exclusive: false,
+                                     autoDelete: false,
+                                     arguments: null);
+
+                var cvDtoJson = JsonConvert.SerializeObject(fullCvDto);
+                var body = Encoding.UTF8.GetBytes(cvDtoJson);
+
+                var properties = channel.CreateBasicProperties();
+                properties.Persistent = true;
+
+                channel.BasicPublish(exchange: "",
+                                     routingKey: "cv_processing_queue",
+                                     basicProperties: properties,
+                                     body: body);
+            }
+        }
+
+
+        [HttpPost("storeindatabase")]
+        public async Task<JsonResult> StoreInDatabaseFromQueue()
+        {
+            try
+            {
+                if (DequeueCvFromQueue(out FullCvDto fullCvDto))
+                {
+                    await ProcessAndStoreCv(fullCvDto);
+                    return new JsonResult("CV stored successfully.");
+                }
+                else
+                {
+                    return new JsonResult("No CVs in the queue.");
                 }
             }
             catch (Exception ex)
             {
                 return new JsonResult("Error: " + ex.Message);
             }
-        }  
+        }
 
-        private void EnqueueCvForProcessing(FullCvDto fullCvDto)
+        private bool DequeueCvFromQueue(out FullCvDto fullCvDto)
         {
-            try
+            var factory = new ConnectionFactory() { HostName = "localhost" }; 
+            using (var connection = factory.CreateConnection())
+            using (var channel = connection.CreateModel())
             {
-                var factory = new ConnectionFactory() { HostName = "localhost" };
-                using (var connection = factory.CreateConnection())
-                using (var channel = connection.CreateModel())
+                channel.QueueDeclare(queue: "cv_processing_queue",
+                                     durable: true,
+                                     exclusive: false,
+                                     autoDelete: false,
+                                     arguments: null);
+
+                var consumer = new EventingBasicConsumer(channel);
+                BasicGetResult result = channel.BasicGet("cv_processing_queue", true);
+
+                if (result != null)
                 {
-                    channel.QueueDeclare(queue: "cv_processing_queue",
-                                         durable: true,
-                                         exclusive: false,
-                                         autoDelete: false,
-                                         arguments: null);
-
-                    string message = JsonConvert.SerializeObject(fullCvDto);
-                    var body = Encoding.UTF8.GetBytes(message);
-
-                    var properties = channel.CreateBasicProperties();
-                    properties.Persistent = true;
-
-                    channel.BasicPublish(exchange: "",
-                                         routingKey: "cv_processing_queue",
-                                         basicProperties: properties,
-                                         body: body);
+                    var body = result.Body.ToArray();
+                    var cvDtoJson = Encoding.UTF8.GetString(body);
+                    fullCvDto = JsonConvert.DeserializeObject<FullCvDto>(cvDtoJson);
+                    return true;
+                }
+                else
+                {
+                    fullCvDto = null;
+                    return false;
                 }
             }
-            catch (Exception ex)
+        }
+
+        private async Task ProcessAndStoreCv(FullCvDto fullCvDto)
+        {
+            using (var transaction = _context.Database.BeginTransaction())
             {
-                Console.WriteLine("Error enqueuing CV for processing: " + ex.Message);
+                // Create a new user
+                var user = new User
+                {
+                    Username = fullCvDto.Username,
+                    Email = fullCvDto.Email,
+                    CreatedAt = DateTime.Now
+                };
+
+                // Add the user to the database
+                _context.Users.Add(user);
+                await _context.SaveChangesAsync(); // Save changes immediately to get the UserID
+
+                // Add personal information
+                var personalInfo = new PersonalInfo
+                {
+                    UserID = user.UserID,
+                    FullName = fullCvDto.FullName,
+                    Address = fullCvDto.Address,
+                    PhoneNumber = fullCvDto.PhoneNumber,
+                    DateOfBirth = fullCvDto.DateOfBirth ?? DateTime.MinValue
+                };
+                _context.PersonalInfo.Add(personalInfo);
+
+                // Add educations
+                _context.Education.AddRange(fullCvDto.Educations.Select(e => new Education
+                {
+                    UserID = user.UserID,
+                    InstitutionName = e.InstitutionName,
+                    Degree = e.Degree,
+                    FieldOfStudy = e.FieldOfStudy,
+                    StartDate = e.StartDate ?? DateTime.MinValue,
+                    EndDate = e.EndDate ?? DateTime.MinValue
+                }));
+
+                // Add certifications
+                _context.Certifications.AddRange(fullCvDto.Certifications.Select(c => new Certification
+                {
+                    UserID = user.UserID,
+                    CertificationName = c.CertificationName,
+                    IssuingOrganization = c.IssuingOrganization,
+                    IssueDate = c.IssueDate ?? DateTime.MinValue,
+                    ExpiryDate = c.ExpiryDate ?? DateTime.MinValue
+                }));
+
+                // Add skills
+                _context.Skills.AddRange(fullCvDto.Skills.Select(s => new Skill
+                {
+                    UserID = user.UserID,
+                    SkillName = s.SkillName,
+                    SkillLevel = s.SkillLevel
+                }));
+
+                // Add work experiences
+                _context.WorkExperience.AddRange(fullCvDto.WorkExperiences.Select(we => new WorkExperience
+                {
+                    UserID = user.UserID,
+                    CompanyName = we.CompanyName,
+                    Position = we.Position,
+                    StartDate = we.StartDate ?? DateTime.MinValue,
+                    EndDate = we.EndDate ?? DateTime.MinValue,
+                    Responsibilities = we.Responsibilities
+                }));
+
+                // Save changes to the database
+                await _context.SaveChangesAsync();
+
+                // Commit transaction
+                transaction.Commit();
             }
         }
 
